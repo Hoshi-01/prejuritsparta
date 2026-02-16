@@ -99,7 +99,7 @@ async def main() -> None:
     ap.add_argument("--my-balance-usdc", type=float, default=100.0, help="your account balance reference (for percent mode)")
     ap.add_argument("--source-balance-usdc", type=float, default=20000.0, help="source account balance reference (for percent mode)")
     ap.add_argument("--fixed-order-usdc", type=float, default=1.0, help="fixed order notional in USDC (for fixed mode)")
-    ap.add_argument("--max-order-usdc", type=float, default=0.0, help="optional hard cap USDC per copied order (0=disabled)")
+    # hard cap removed by request
     ap.add_argument("--min-price", type=float, default=0.01, help="minimum valid price")
     ap.add_argument("--max-price", type=float, default=0.99, help="maximum valid price")
     ap.add_argument("--bootstrap-seconds", type=int, default=120, help="ignore historical trades older than this at startup")
@@ -112,8 +112,7 @@ async def main() -> None:
         if args.fixed_order_usdc <= 0:
             raise ValueError("--fixed-order-usdc must be > 0 in fixed mode")
 
-    if args.max_order_usdc < 0:
-        raise ValueError("--max-order-usdc must be >= 0")
+    # hard cap validation removed
 
     source_wallet = resolve_source_to_wallet(args.source)
     print(f"🎯 Source resolved: {args.source} -> {source_wallet}")
@@ -121,13 +120,11 @@ async def main() -> None:
         scale = args.my_balance_usdc / args.source_balance_usdc
         print(
             f"⚙️ Mode: {'PAPER' if args.paper else 'LIVE'} | Sizing: PERCENT | "
-            f"Scale={scale:.6f} ({args.my_balance_usdc:.2f}/{args.source_balance_usdc:.2f}) | "
-            f"HardCap={'OFF' if args.max_order_usdc == 0 else f'${args.max_order_usdc:.2f}'}"
+            f"Scale={scale:.6f} ({args.my_balance_usdc:.2f}/{args.source_balance_usdc:.2f})"
         )
     else:
         print(
-            f"⚙️ Mode: {'PAPER' if args.paper else 'LIVE'} | Sizing: FIXED ${args.fixed_order_usdc:.2f} | "
-            f"HardCap={'OFF' if args.max_order_usdc == 0 else f'${args.max_order_usdc:.2f}'}"
+            f"⚙️ Mode: {'PAPER' if args.paper else 'LIVE'} | Sizing: FIXED ${args.fixed_order_usdc:.2f}"
         )
 
     bot = None if args.paper else create_bot_from_env()
@@ -177,8 +174,7 @@ async def main() -> None:
                 else:
                     order_usdc = args.fixed_order_usdc
 
-                if args.max_order_usdc > 0:
-                    order_usdc = min(order_usdc, args.max_order_usdc)
+                # hard cap removed by request
 
                 if order_usdc <= 0:
                     continue
