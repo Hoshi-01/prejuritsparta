@@ -3,7 +3,7 @@
 Run Fair Value Strategy — Ultra Aggressive
 
 USAGE:
-    python scripts/run_fair_value.py                    # Default: $10 modal, $0.50/trade
+    python scripts/run_fair_value.py                    # Default: $10 modal, $1.00/trade
     python scripts/run_fair_value.py --balance 50       # Start with $50
     python scripts/run_fair_value.py --size 1.00        # $1.00 per trade
     python scripts/run_fair_value.py --phase2           # Enable % sizing (3% of balance)
@@ -29,7 +29,7 @@ from strategies.fair_value import FairValueStrategy, FairValueConfig
 def parse_args():
     parser = argparse.ArgumentParser(description="Polymarket Fair Value Strategy — Ultra Aggressive")
     parser.add_argument("--balance", type=float, default=10.0, help="Starting balance in USDC (default: 10)")
-    parser.add_argument("--size", type=float, default=0.50, help="Fixed trade size in USDC (default: 0.50)")
+    parser.add_argument("--size", type=float, default=1.00, help="Fixed trade size in USDC (default: 1.00)")
     parser.add_argument("--phase2", action="store_true", help="Enable %% sizing instead of fixed")
     parser.add_argument("--pct", type=float, default=3.0, help="Percent of balance per trade if --phase2 (default: 3)")
     parser.add_argument("--threshold", type=float, default=0.02, help="Signal threshold %% (default: 0.02)")

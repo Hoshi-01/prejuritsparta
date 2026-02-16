@@ -9,7 +9,7 @@ Mode: ULTRA AGGRESSIVE
 - Min edge: 0.5% (requires minimal mispricing)
 - Coins: BTC, ETH, SOL, XRP (all coins)
 - Max trades: ~150+/day
-- Size: FIXED $0.50 per trade (Phase 1)
+- Size: FIXED $1.00 per trade (Phase 1)
 
 Usage:
     python scripts/run_fair_value.py
@@ -35,7 +35,7 @@ class FairValueConfig(StrategyConfig):
     """Fair Value Ultra Aggressive configuration."""
     
     # === SIZING ===
-    size_usd: float = 0.50           # FIXED $0.50 per trade (Phase 1)
+    size_usd: float = 1.00           # FIXED $1.00 per trade (Phase 1)
     use_percent_sizing: bool = False  # True = use % of balance (Phase 2)
     percent_size: float = 3.0        # 3% of balance (Phase 2 only)
     
@@ -194,6 +194,9 @@ class FairValueStrategy(BaseStrategy):
         # Error tracking
         self.consecutive_errors = 0
         self.max_consecutive_errors = 3
+
+        # Adaptive tuning
+        self.drawdown_tuned = False
     
     # ========================================
     # RISK CHECKS
@@ -216,8 +219,12 @@ class FairValueStrategy(BaseStrategy):
         if self.balance < self.fv_config.min_balance:
             return False, f"STOP: Balance ${self.balance:.2f} < ${self.fv_config.min_balance}"
         
-        # Daily loss
-        if self.daily_loss >= self.fv_config.max_daily_loss:
+        # Auto-tune after $2 drawdown (without stopping the bot)
+        if self.daily_loss >= 2.0 and not self.drawdown_tuned:
+            self._apply_drawdown_tuning()
+
+        # Daily loss hard stop (disabled when max_daily_loss <= 0)
+        if self.fv_config.max_daily_loss > 0 and self.daily_loss >= self.fv_config.max_daily_loss:
             return False, f"PAUSE: Daily loss ${self.daily_loss:.2f} >= ${self.fv_config.max_daily_loss}"
         
         # Consecutive losses
@@ -229,6 +236,17 @@ class FairValueStrategy(BaseStrategy):
             return False, f"ERROR HALT: {self.consecutive_errors} consecutive API errors"
         
         return True, "OK"
+
+    def _apply_drawdown_tuning(self) -> None:
+        """Reduce aggressiveness after significant drawdown."""
+        self.drawdown_tuned = True
+        self.fv_config.min_edge = max(self.fv_config.min_edge, 0.01)
+        self.fv_config.max_trades_per_window = 1
+        self.fv_config.binance_lookback = max(self.fv_config.binance_lookback, 7)
+        self.log(
+            "[TUNING] Drawdown >= $2 detected → min_edge=1.0%, max_trades/window=1, lookback=7",
+            "warning",
+        )
     
     # ========================================
     # MAIN TICK LOGIC
@@ -344,9 +362,13 @@ class FairValueStrategy(BaseStrategy):
         shares = size_usd / entry_price
         
         # 7. Execute trade
+        placed = await self.execute_buy(side, entry_price)
+        if not placed:
+            return
+
         self.total_trades += 1
         self.trades_this_window += 1
-        
+
         self.log(
             f"[TRADE #{self.total_trades}] {coin} | BUY {side.upper()} | "
             f"Price: {entry_price:.0%} | Shares: {shares:.2f} | "
@@ -354,8 +376,6 @@ class FairValueStrategy(BaseStrategy):
             f"Fair: {fair_up:.0%} | Binance: {change:+.4f}%",
             "trade"
         )
-        
-        await self.execute_buy(side, entry_price)
         
         # Record trade
         self.daily_trades.append({
@@ -406,6 +426,13 @@ class FairValueStrategy(BaseStrategy):
         if total == 0:
             return 0.0
         return (self.wins / total) * 100
+
+    def on_position_closed(self, position, pnl: float, exit_type: str) -> None:
+        """Update strategy-level stats when a position is closed."""
+        if pnl >= 0:
+            self.record_win(pnl)
+        else:
+            self.record_loss(abs(pnl))
     
     # ========================================
     # MARKET EVENTS
