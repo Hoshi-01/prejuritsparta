@@ -36,6 +36,7 @@ class FairValueConfig(StrategyConfig):
     
     # === SIZING ===
     size_usd: float = 1.00           # FIXED $1.00 per trade (Phase 1)
+    max_order_value_usd: float = 1.00  # HARD CAP: max $1 notional per order
     use_percent_sizing: bool = False  # True = use % of balance (Phase 2)
     percent_size: float = 3.0        # 3% of balance (Phase 2 only)
     

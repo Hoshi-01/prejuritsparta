@@ -319,12 +319,24 @@ class BaseStrategy(ABC):
             self.log(f"No token ID for {side}", "error")
             return False
 
-        size = self.config.size / current_price
         # Polymarket 15m markets use 0.01 tick size; quantize price to valid tick.
         buy_price_raw = min(current_price + 0.02, 0.99)
         buy_price = math.ceil(buy_price_raw * 100) / 100
 
-        self.log(f"BUY {side.upper()} @ {current_price:.4f} size={size:.2f}", "trade")
+        # HARD CAP notional per order (default $1 if configured by strategy)
+        max_order_value_usd = float(getattr(self.config, "max_order_value_usd", self.config.size))
+        if max_order_value_usd <= 0:
+            self.log("Invalid max_order_value_usd; skipping buy", "error")
+            return False
+
+        # shares chosen so order notional at LIMIT PRICE never exceeds cap
+        size = max_order_value_usd / buy_price
+        est_cost = size * buy_price
+
+        self.log(
+            f"BUY {side.upper()} @ {current_price:.4f} size={size:.2f} est_cost=${est_cost:.2f}",
+            "trade"
+        )
 
         result = await self.bot.place_order(
             token_id=token_id,
