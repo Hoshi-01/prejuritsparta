@@ -346,6 +346,18 @@ class BaseStrategy(ABC):
             "trade"
         )
 
+        if bool(getattr(self.config, "paper_mode", False)):
+            paper_id = f"paper-{int(time.time())}"
+            self.log(f"[PAPER] BUY simulated id={paper_id}", "success")
+            self.positions.open_position(
+                side=side,
+                token_id=token_id,
+                entry_price=current_price,
+                size=size,
+                order_id=paper_id,
+            )
+            return True
+
         result = await self.bot.place_order(
             token_id=token_id,
             price=buy_price,
@@ -382,6 +394,11 @@ class BaseStrategy(ABC):
         sell_price_raw = max(current_price - 0.02, 0.01)
         sell_price = math.floor(sell_price_raw * 100) / 100
         pnl = position.get_pnl(current_price)
+
+        if bool(getattr(self.config, "paper_mode", False)):
+            self.log(f"[PAPER] SELL simulated PnL: ${pnl:+.2f}", "success")
+            self.positions.close_position(position.id, realized_pnl=pnl)
+            return True
 
         result = await self.bot.place_order(
             token_id=position.token_id,

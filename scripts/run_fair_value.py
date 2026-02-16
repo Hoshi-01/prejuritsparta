@@ -36,6 +36,7 @@ def parse_args():
     parser.add_argument("--edge", type=float, default=0.005, help="Min edge vs Polymarket (default: 0.005 = 0.5%%)")
     parser.add_argument("--coins", nargs="+", default=["BTC", "ETH", "SOL", "XRP"], help="Coins to trade")
     parser.add_argument("--max-daily-loss", type=float, default=2.00, help="Max daily loss before stop")
+    parser.add_argument("--paper", action="store_true", help="Paper mode (simulate orders, no real trades)")
     return parser.parse_args()
 
 
@@ -51,6 +52,7 @@ async def main():
     print(f"  Min Edge:       {args.edge * 100:.1f}%")
     print(f"  Coins:          {', '.join(args.coins)}")
     print(f"  Max Daily Loss: ${args.max_daily_loss:.2f}")
+    print(f"  Mode:           {'PAPER (simulated)' if args.paper else 'LIVE'}")
     print(f"  Phase:          {'Phase 2 (compound)' if args.phase2 else 'Phase 1 (fixed size)'}")
     print("=" * 60)
     
@@ -74,6 +76,7 @@ async def main():
         signal_threshold=args.threshold,
         min_edge=args.edge,
         max_daily_loss=args.max_daily_loss,
+        paper_mode=args.paper,
         coins=args.coins,
         max_trades_per_window=2,
         take_profit=0.30,
