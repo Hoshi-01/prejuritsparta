@@ -54,6 +54,7 @@ class Order:
     side: str
     maker: str
     nonce: Optional[int] = None
+    salt: Optional[int] = None
     fee_rate_bps: int = 0
     signature_type: int = 2
 
@@ -70,7 +71,10 @@ class Order:
             raise ValueError(f"Invalid size: {self.size}")
 
         if self.nonce is None:
-            self.nonce = int(time.time())
+            self.nonce = int(time.time() * 1000)
+
+        if self.salt is None:
+            self.salt = int(time.time_ns())
 
         # Convert to integers for blockchain
         self.maker_amount = str(int(self.size * self.price * 10**USDC_DECIMALS))
@@ -229,7 +233,7 @@ class OrderSigner:
         try:
             # Build order message for EIP-712
             order_message = {
-                "salt": 0,
+                "salt": int(order.salt),
                 "maker": to_checksum_address(order.maker),
                 "signer": self.address,
                 "taker": "0x0000000000000000000000000000000000000000",
@@ -252,16 +256,22 @@ class OrderSigner:
 
             signed = self.wallet.sign_message(signable)
 
+            # CLOB expects the full signed order payload (matching py-clob-client)
             return {
                 "order": {
-                    "tokenId": order.token_id,
-                    "price": order.price,
-                    "size": order.size,
-                    "side": order.side,
+                    "salt": str(order.salt),
                     "maker": order.maker,
-                    "nonce": order.nonce,
-                    "feeRateBps": order.fee_rate_bps,
+                    "signer": self.address,
+                    "taker": "0x0000000000000000000000000000000000000000",
+                    "tokenId": str(order.token_id),
+                    "makerAmount": str(order.maker_amount),
+                    "takerAmount": str(order.taker_amount),
+                    "expiration": "0",
+                    "nonce": str(order.nonce),
+                    "feeRateBps": str(order.fee_rate_bps),
+                    "side": order.side,
                     "signatureType": order.signature_type,
+                    "signature": "0x" + signed.signature.hex(),
                 },
                 "signature": "0x" + signed.signature.hex(),
                 "signer": self.address,

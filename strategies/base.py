@@ -22,6 +22,7 @@ Usage:
 
 import asyncio
 import time
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Dict, List
@@ -298,7 +299,9 @@ class BaseStrategy(ABC):
                 )
 
             # Execute sell
-            await self.execute_sell(position, prices.get(position.side, 0))
+            sold = await self.execute_sell(position, prices.get(position.side, 0))
+            if sold:
+                self.on_position_closed(position, pnl, exit_type)
 
     async def execute_buy(self, side: str, current_price: float) -> bool:
         """
@@ -317,7 +320,9 @@ class BaseStrategy(ABC):
             return False
 
         size = self.config.size / current_price
-        buy_price = min(current_price + 0.02, 0.99)
+        # Polymarket 15m markets use 0.01 tick size; quantize price to valid tick.
+        buy_price_raw = min(current_price + 0.02, 0.99)
+        buy_price = math.ceil(buy_price_raw * 100) / 100
 
         self.log(f"BUY {side.upper()} @ {current_price:.4f} size={size:.2f}", "trade")
 
@@ -353,7 +358,9 @@ class BaseStrategy(ABC):
         Returns:
             True if order placed
         """
-        sell_price = max(current_price - 0.02, 0.01)
+        # Polymarket 15m markets use 0.01 tick size; quantize price to valid tick.
+        sell_price_raw = max(current_price - 0.02, 0.01)
+        sell_price = math.floor(sell_price_raw * 100) / 100
         pnl = position.get_pnl(current_price)
 
         result = await self.bot.place_order(
@@ -423,6 +430,10 @@ class BaseStrategy(ABC):
 
     def on_market_change(self, old_slug: str, new_slug: str) -> None:
         """Called when market changes."""
+        pass
+
+    def on_position_closed(self, position: Position, pnl: float, exit_type: str) -> None:
+        """Called after a position is closed successfully."""
         pass
 
     def on_connect(self) -> None:

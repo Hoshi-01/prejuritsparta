@@ -292,7 +292,7 @@ class TradingBot:
         size: float,
         side: str,
         order_type: str = "GTC",
-        fee_rate_bps: int = 0
+        fee_rate_bps: int = 1000
     ) -> OrderResult:
         """
         Place a limit order.
@@ -311,32 +311,96 @@ class TradingBot:
         signer = self.require_signer()
 
         try:
-            # Create order
-            order = Order(
-                token_id=token_id,
-                price=price,
-                size=size,
-                side=side,
-                maker=self.config.safe_address,
-                fee_rate_bps=fee_rate_bps,
-            )
+            # Prefer official py-clob-client path for order construction/submission
+            # to stay aligned with CLOB payload requirements.
+            try:
+                from py_clob_client.client import ClobClient as PyClobClient
+                from py_clob_client.clob_types import OrderArgs as PyOrderArgs, OrderType as PyOrderType, ApiCreds as PyApiCreds
 
-            # Sign order
-            signed = signer.sign_order(order)
+                pk_hex = signer.wallet.key.hex()
+                py_client = PyClobClient(
+                    self.config.clob.host,
+                    key=pk_hex,
+                    chain_id=self.config.clob.chain_id,
+                    signature_type=self.config.clob.signature_type,
+                    funder=self.config.safe_address,
+                )
 
-            # Submit to CLOB
-            response = await self._run_in_thread(
-                self.clob_client.post_order,
-                signed,
-                order_type,
-            )
+                if self._api_creds and self._api_creds.is_valid():
+                    py_client.set_api_creds(
+                        PyApiCreds(
+                            api_key=self._api_creds.api_key,
+                            api_secret=self._api_creds.secret,
+                            api_passphrase=self._api_creds.passphrase,
+                        )
+                    )
+                else:
+                    py_client.set_api_creds(py_client.create_or_derive_api_creds())
 
-            logger.info(
-                f"Order placed: {side} {size}@{price} "
-                f"(token: {token_id[:16]}...)"
-            )
+                order = await self._run_in_thread(
+                    py_client.create_order,
+                    PyOrderArgs(
+                        token_id=str(token_id),
+                        price=float(price),
+                        size=float(size),
+                        side=side.upper(),
+                    )
+                )
 
-            return OrderResult.from_response(response)
+                py_order_type = {
+                    "GTC": PyOrderType.GTC,
+                    "GTD": PyOrderType.GTD,
+                    "FOK": PyOrderType.FOK,
+                }.get(order_type.upper(), PyOrderType.GTC)
+
+                response = await self._run_in_thread(
+                    py_client.post_order,
+                    order,
+                    py_order_type,
+                )
+
+                order_id = None
+                status = None
+                if isinstance(response, dict):
+                    order_id = response.get("orderID") or response.get("orderId")
+                    status = response.get("status")
+
+                logger.info(
+                    f"Order placed: {side} {size}@{price} "
+                    f"(token: {token_id[:16]}...)"
+                )
+
+                return OrderResult(
+                    success=True,
+                    order_id=order_id,
+                    status=status,
+                    message="Order placed successfully",
+                    data=response if isinstance(response, dict) else {"raw": str(response)},
+                )
+
+            except ImportError:
+                # Fallback to internal signer/client flow when py-clob-client is unavailable.
+                order = Order(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                    maker=self.config.safe_address,
+                    fee_rate_bps=fee_rate_bps,
+                )
+                signed = signer.sign_order(order)
+                response = await self._run_in_thread(
+                    self.clob_client.post_order,
+                    signed,
+                    order_type,
+                )
+
+                logger.info(
+                    f"Order placed: {side} {size}@{price} "
+                    f"(token: {token_id[:16]}...)"
+                )
+
+                return OrderResult.from_response(response)
 
         except Exception as e:
             logger.error(f"Failed to place order: {e}")
