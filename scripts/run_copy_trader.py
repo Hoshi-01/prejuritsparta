@@ -90,6 +90,20 @@ def item_key(it: Dict[str, Any]) -> str:
     )
 
 
+def normalize_ts_ms(ts_raw: Any) -> int:
+    """Normalize timestamp to milliseconds (data API may return sec or ms)."""
+    try:
+        ts = int(float(ts_raw))
+    except Exception:
+        return 0
+    if ts <= 0:
+        return 0
+    # If epoch looks like seconds, convert to ms
+    if ts < 10_000_000_000:
+        ts *= 1000
+    return ts
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser(description="Polymarket copy trader")
     ap.add_argument("--source", required=True, help="@pseudonym or 0x wallet to follow")
@@ -144,7 +158,7 @@ async def main() -> None:
                     continue
                 seen.add(k)
 
-                ts = int(it.get("timestamp") or 0)
+                ts = normalize_ts_ms(it.get("timestamp"))
                 if ts and ts < (start_ms - args.bootstrap_seconds * 1000):
                     continue
 
