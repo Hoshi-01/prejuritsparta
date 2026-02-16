@@ -76,7 +76,7 @@ async def main():
         max_daily_loss=args.max_daily_loss,
         coins=args.coins,
         max_trades_per_window=2,
-        take_profit=0.10,
+        take_profit=0.30,
         stop_loss=0.05,
     )
     
