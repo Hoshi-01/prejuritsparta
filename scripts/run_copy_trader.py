@@ -17,9 +17,10 @@ import asyncio
 import time
 import sys
 import os
-from typing import Dict, Any, List, Set
+from typing import Dict, Any, List, Set, Optional
 
 import requests
+import math
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -77,6 +78,24 @@ def fetch_activity(user_wallet: str, limit: int = 100) -> List[Dict[str, Any]]:
     return items if isinstance(items, list) else []
 
 
+def top_of_book(token_id: str) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Return best_bid, best_ask, spread for token from CLOB /book."""
+    try:
+        r = requests.get("https://clob.polymarket.com/book", params={"token_id": token_id}, timeout=10)
+        r.raise_for_status()
+        data = r.json() if r.content else {}
+        bids = data.get("bids") or []
+        asks = data.get("asks") or []
+        best_bid = float(bids[0]["price"]) if bids else None
+        best_ask = float(asks[0]["price"]) if asks else None
+        spread = None
+        if best_bid is not None and best_ask is not None:
+            spread = best_ask - best_bid
+        return best_bid, best_ask, spread
+    except Exception:
+        return None, None, None
+
+
 def item_key(it: Dict[str, Any]) -> str:
     return "|".join(
         [
@@ -117,6 +136,9 @@ async def main() -> None:
     ap.add_argument("--min-price", type=float, default=0.01, help="minimum valid price")
     ap.add_argument("--max-price", type=float, default=0.99, help="maximum valid price")
     ap.add_argument("--bootstrap-seconds", type=int, default=120, help="ignore historical trades older than this at startup")
+    ap.add_argument("--max-lag-ms", type=int, default=1500, help="skip source fills older than this (ms)")
+    ap.add_argument("--max-spread", type=float, default=0.03, help="skip when spread exceeds this")
+    ap.add_argument("--cross-tick", type=float, default=0.01, help="price crossing increment for faster fills")
     args = ap.parse_args()
 
     if args.size_mode == "percent":
@@ -164,14 +186,37 @@ async def main() -> None:
 
                 side = str(it.get("side") or "").upper()
                 token_id = str(it.get("asset") or "")
-                price = float(it.get("price") or 0)
+                src_price = float(it.get("price") or 0)
 
                 if side not in {"BUY", "SELL"}:
                     continue
                 if not token_id:
                     continue
-                if not (args.min_price <= price <= args.max_price):
+                if not (args.min_price <= src_price <= args.max_price):
                     continue
+
+                # stale activity guard (milliseconds)
+                now_ms = int(time.time() * 1000)
+                lag_ms = now_ms - ts if ts else 0
+                if ts and lag_ms > args.max_lag_ms:
+                    continue
+
+                # Use live top-of-book to avoid stale source price/slippage traps
+                best_bid, best_ask, spread = top_of_book(token_id)
+                if spread is not None and spread > args.max_spread:
+                    continue
+
+                if side == "BUY":
+                    if best_ask is None:
+                        continue
+                    price = min(args.max_price, best_ask + args.cross_tick)
+                else:
+                    if best_bid is None:
+                        continue
+                    price = max(args.min_price, best_bid - args.cross_tick)
+
+                # 0.01 tick normalization
+                price = max(args.min_price, min(args.max_price, round(price * 100) / 100))
 
                 src_usdc_size = float(it.get("usdcSize") or 0)
                 if src_usdc_size <= 0:
@@ -197,8 +242,9 @@ async def main() -> None:
 
                 if args.paper:
                     print(
-                        f"[PAPER COPY] {side} token={token_id[:14]}.. price={price:.4f} "
-                        f"src=${src_usdc_size:.2f} copy=${order_usdc:.2f} shares={shares:.4f}"
+                        f"[PAPER COPY] {side} token={token_id[:14]}.. px={price:.4f} "
+                        f"src_px={src_price:.4f} src=${src_usdc_size:.2f} copy=${order_usdc:.2f} "
+                        f"shares={shares:.4f} lag={lag_ms}ms spread={spread if spread is not None else 'na'}"
                     )
                     continue
 
@@ -210,9 +256,9 @@ async def main() -> None:
                     order_type="FOK",
                 )
                 if res.success:
-                    print(f"[LIVE COPY OK] {side} token={token_id[:14]}.. price={price:.4f} shares={shares:.4f} order={res.order_id}")
+                    print(f"[LIVE COPY OK] {side} token={token_id[:14]}.. price={price:.4f} shares={shares:.4f} lag={lag_ms}ms spread={spread if spread is not None else 'na'} order={res.order_id}")
                 else:
-                    print(f"[LIVE COPY FAIL] {side} token={token_id[:14]}.. err={res.message}")
+                    print(f"[LIVE COPY FAIL] {side} token={token_id[:14]}.. err={res.message} lag={lag_ms}ms spread={spread if spread is not None else 'na'}")
 
         except Exception as e:
             print(f"[WARN] loop error: {e}")
