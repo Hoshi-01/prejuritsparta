@@ -3,12 +3,13 @@
 Copy trader for Polymarket.
 
 - Follows a target profile/address activity from Data API
-- Mirrors BUY/SELL trades with hard max USDC per order
+- Mirrors BUY/SELL trades from target activity
+- Supports % sizing (recommended for small-vs-big account scaling)
 - Supports paper mode (simulation) and live mode
 
 Examples:
-  python scripts/run_copy_trader.py --source @k9Q2mX4L8A7ZP3R --paper
-  python scripts/run_copy_trader.py --source 0xabc... --max-order-usdc 1.0
+  python scripts/run_copy_trader.py --source @k9Q2mX4L8A7ZP3R --paper --size-mode percent --my-balance-usdc 100 --source-balance-usdc 20000
+  python scripts/run_copy_trader.py --source 0xabc... --size-mode fixed --fixed-order-usdc 1.0
 """
 
 import argparse
@@ -94,18 +95,40 @@ async def main() -> None:
     ap.add_argument("--source", required=True, help="@pseudonym or 0x wallet to follow")
     ap.add_argument("--paper", action="store_true", help="simulate only, no live orders")
     ap.add_argument("--poll-seconds", type=float, default=8.0, help="poll interval")
-    ap.add_argument("--max-order-usdc", type=float, default=1.0, help="hard cap USDC per copied order")
+    ap.add_argument("--size-mode", choices=["percent", "fixed"], default="percent", help="sizing mode")
+    ap.add_argument("--my-balance-usdc", type=float, default=100.0, help="your account balance reference (for percent mode)")
+    ap.add_argument("--source-balance-usdc", type=float, default=20000.0, help="source account balance reference (for percent mode)")
+    ap.add_argument("--fixed-order-usdc", type=float, default=1.0, help="fixed order notional in USDC (for fixed mode)")
+    ap.add_argument("--max-order-usdc", type=float, default=0.0, help="optional hard cap USDC per copied order (0=disabled)")
     ap.add_argument("--min-price", type=float, default=0.01, help="minimum valid price")
     ap.add_argument("--max-price", type=float, default=0.99, help="maximum valid price")
     ap.add_argument("--bootstrap-seconds", type=int, default=120, help="ignore historical trades older than this at startup")
     args = ap.parse_args()
 
-    if args.max_order_usdc <= 0:
-        raise ValueError("--max-order-usdc must be > 0")
+    if args.size_mode == "percent":
+        if args.my_balance_usdc <= 0 or args.source_balance_usdc <= 0:
+            raise ValueError("--my-balance-usdc and --source-balance-usdc must be > 0")
+    else:
+        if args.fixed_order_usdc <= 0:
+            raise ValueError("--fixed-order-usdc must be > 0 in fixed mode")
+
+    if args.max_order_usdc < 0:
+        raise ValueError("--max-order-usdc must be >= 0")
 
     source_wallet = resolve_source_to_wallet(args.source)
     print(f"🎯 Source resolved: {args.source} -> {source_wallet}")
-    print(f"⚙️ Mode: {'PAPER' if args.paper else 'LIVE'} | Max order: ${args.max_order_usdc:.2f}")
+    if args.size_mode == "percent":
+        scale = args.my_balance_usdc / args.source_balance_usdc
+        print(
+            f"⚙️ Mode: {'PAPER' if args.paper else 'LIVE'} | Sizing: PERCENT | "
+            f"Scale={scale:.6f} ({args.my_balance_usdc:.2f}/{args.source_balance_usdc:.2f}) | "
+            f"HardCap={'OFF' if args.max_order_usdc == 0 else f'${args.max_order_usdc:.2f}'}"
+        )
+    else:
+        print(
+            f"⚙️ Mode: {'PAPER' if args.paper else 'LIVE'} | Sizing: FIXED ${args.fixed_order_usdc:.2f} | "
+            f"HardCap={'OFF' if args.max_order_usdc == 0 else f'${args.max_order_usdc:.2f}'}"
+        )
 
     bot = None if args.paper else create_bot_from_env()
 
@@ -139,11 +162,34 @@ async def main() -> None:
                 if not (args.min_price <= price <= args.max_price):
                     continue
 
-                # hard cap notional
-                shares = args.max_order_usdc / price
+                src_usdc_size = float(it.get("usdcSize") or 0)
+                if src_usdc_size <= 0:
+                    src_size = float(it.get("size") or 0)
+                    if src_size > 0:
+                        src_usdc_size = src_size * price
+
+                if src_usdc_size <= 0:
+                    continue
+
+                if args.size_mode == "percent":
+                    ratio = args.my_balance_usdc / args.source_balance_usdc
+                    order_usdc = src_usdc_size * ratio
+                else:
+                    order_usdc = args.fixed_order_usdc
+
+                if args.max_order_usdc > 0:
+                    order_usdc = min(order_usdc, args.max_order_usdc)
+
+                if order_usdc <= 0:
+                    continue
+
+                shares = order_usdc / price
 
                 if args.paper:
-                    print(f"[PAPER COPY] {side} token={token_id[:14]}.. price={price:.4f} shares={shares:.4f} cost=${shares*price:.2f}")
+                    print(
+                        f"[PAPER COPY] {side} token={token_id[:14]}.. price={price:.4f} "
+                        f"src=${src_usdc_size:.2f} copy=${order_usdc:.2f} shares={shares:.4f}"
+                    )
                     continue
 
                 res = await bot.place_order(
