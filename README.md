@@ -329,6 +329,46 @@ pytest tests/ -v --cov=src
 | `Order failed` | Check you have sufficient balance |
 | `WebSocket not connecting` | Check network/firewall settings |
 
+## Node.js Streaming Copy Trader (New)
+
+A Node.js event-driven copy engine was added in `scripts/copy_trader_stream.js`.
+It uses Polymarket CLOB WebSocket events as the primary trigger (not a polling-only loop), while doing lightweight Data API reconciliation in the background.
+
+### Key behavior
+- Percent sizing logic kept: `copy_notional = source_trade_usdc * (my_balance/source_balance)`
+- Risk controls: `--max-lag-ms`, `--max-spread`, `--cross-tick`, `--min-price`, `--max-price`
+- Modes:
+  - `--paper` (default): logs simulated copied orders
+  - `--live`: routes execution through existing Python bot via `scripts/place_order_once.py`
+
+### Run (paper)
+```bash
+node scripts/copy_trader_stream.js \
+  --source @k9Q2mX4L8A7ZP3R \
+  --paper \
+  --size-mode percent \
+  --my-balance-usdc 100 \
+  --source-balance-usdc 20000 \
+  --max-lag-ms 1500 \
+  --max-spread 0.03 \
+  --cross-tick 0.01
+```
+
+### Run (live via Python bridge)
+```bash
+node scripts/copy_trader_stream.js \
+  --source @k9Q2mX4L8A7ZP3R \
+  --live \
+  --python-bin python3
+```
+
+### Quick smoke checks
+```bash
+node --check scripts/copy_trader_stream.js
+node scripts/copy_trader_stream.js --help
+python3 scripts/place_order_once.py --help
+```
+
 ## Contributing
 
 1. Fork the repository
