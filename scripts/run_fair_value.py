@@ -88,15 +88,9 @@ async def main():
     print(f"📊 Starting trading loop...")
     print()
     
-    # Start strategy
+    # Start strategy (BaseStrategy.run() handles start/stop lifecycle)
     try:
-        started = await strategy.start()
-        if started:
-            print("✅ WebSocket connected, strategy running")
-            await strategy.run()
-        else:
-            print("❌ Failed to start strategy")
-            print("Cek apakah market 15-menit sedang aktif")
+        await strategy.run()
     
     except KeyboardInterrupt:
         print("\n\n⏹ Manual stop — shutting down...")
@@ -105,7 +99,7 @@ async def main():
         print(f"\n❌ Strategy error: {e}")
     
     finally:
-        strategy.stop()
+        await strategy.stop()
         
         # Print final summary
         total = strategy.wins + strategy.losses

@@ -234,7 +234,7 @@ class FairValueStrategy(BaseStrategy):
     # MAIN TICK LOGIC
     # ========================================
     
-    def on_tick(self, prices: Dict[str, float]):
+    async def on_tick(self, prices: Dict[str, float]):
         """
         Called every tick — main strategy logic.
         Scans all coins for fair value edge.
@@ -244,7 +244,7 @@ class FairValueStrategy(BaseStrategy):
         if not can_trade:
             self.log(f"[RISK] {reason}", "warning")
             if "STOP" in reason:
-                self.stop()
+                await self.stop()
             return
         
         # Reset trades per window counter
@@ -255,9 +255,9 @@ class FairValueStrategy(BaseStrategy):
             if self.trades_this_window >= self.fv_config.max_trades_per_window:
                 break
             
-            self._evaluate_coin(coin, prices)
+            await self._evaluate_coin(coin, prices)
     
-    def _evaluate_coin(self, coin: str, market_prices: Dict[str, float]):
+    async def _evaluate_coin(self, coin: str, market_prices: Dict[str, float]):
         """Evaluate a single coin for fair value edge."""
         
         # 1. Get Binance price change
@@ -355,7 +355,7 @@ class FairValueStrategy(BaseStrategy):
             "trade"
         )
         
-        self.execute_buy(side, entry_price)
+        await self.execute_buy(side, entry_price)
         
         # Record trade
         self.daily_trades.append({
@@ -427,7 +427,7 @@ class FairValueStrategy(BaseStrategy):
             "info"
         )
     
-    def on_book_update(self, snapshot: OrderbookSnapshot):
+    async def on_book_update(self, snapshot: OrderbookSnapshot):
         """Handle orderbook update."""
         pass  # Price tracking handled by BaseStrategy
     
