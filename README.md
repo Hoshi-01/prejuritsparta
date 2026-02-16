@@ -337,6 +337,12 @@ It uses Polymarket CLOB WebSocket events as the primary trigger (not a polling-o
 ### Key behavior
 - Percent sizing logic kept: `copy_notional = source_trade_usdc * (my_balance/source_balance)`
 - Risk controls: `--max-lag-ms`, `--max-spread`, `--cross-tick`, `--min-price`, `--max-price`
+- Low-latency profiles:
+  - `--profile fast` (default): low-latency settings with safety checks still on
+  - `--profile turbo`: most aggressive path (book HTTP fallback disabled by default, tighter debouncing)
+- Precise latency telemetry per copy decision:
+  - Timestamps: `eventTs`, `recvTs`, `decisionTs`, `submitTs`, `ackTs`
+  - Per-step ms: `ingest`, `decision`, `submit`, `ack`, `total`
 - Modes:
   - `--paper` (default): logs simulated copied orders
   - `--live`: routes execution through existing Python bot via `scripts/place_order_once.py`
@@ -346,12 +352,30 @@ It uses Polymarket CLOB WebSocket events as the primary trigger (not a polling-o
 node scripts/copy_trader_stream.js \
   --source @k9Q2mX4L8A7ZP3R \
   --paper \
+  --profile fast \
   --size-mode percent \
   --my-balance-usdc 100 \
   --source-balance-usdc 20000 \
-  --max-lag-ms 1500 \
+  --max-lag-ms 1200 \
   --max-spread 0.03 \
   --cross-tick 0.01
+```
+
+### Benchmark (paper, latency percentiles)
+```bash
+node scripts/copy_trader_stream.js \
+  --source @k9Q2mX4L8A7ZP3R \
+  --paper \
+  --profile turbo \
+  --benchmark-seconds 120 \
+  --stats-every 25
+```
+
+Sample output (example):
+```text
+📊 Latency (n=25) count=25 total_ms[p50=42.0 p90=77.0 p99=95.0] decision_ms[p50=9.0 p90=18.0] submit_ms[p50=0.0] ack_ms[p50=0.0]
+📊 Latency (n=50) count=50 total_ms[p50=39.0 p90=71.0 p99=93.0] decision_ms[p50=8.0 p90=16.0] submit_ms[p50=0.0] ack_ms[p50=0.0]
+📊 Latency (final) count=61 total_ms[p50=40.0 p90=72.0 p99=94.0] decision_ms[p50=8.0 p90=16.0] submit_ms[p50=0.0] ack_ms[p50=0.0]
 ```
 
 ### Run (live via Python bridge)

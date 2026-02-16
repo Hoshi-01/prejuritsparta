@@ -15,26 +15,41 @@ const DATA_BASE = 'https://data-api.polymarket.com';
 const WSS_MARKET_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 const CLOB_BOOK_URL = 'https://clob.polymarket.com/book';
 
+function parseBool(v, dflt = true) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (!s) return dflt;
+  if (['1', 'true', 'yes', 'y', 'on'].includes(s)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(s)) return false;
+  return dflt;
+}
+
 function parseArgs(argv) {
   const out = {
     source: '',
     mode: 'paper',
+    profile: 'fast',
     sizeMode: 'percent',
     myBalanceUsdc: 100,
     sourceBalanceUsdc: 20000,
     fixedOrderUsdc: 1,
     minPrice: 0.01,
     maxPrice: 0.99,
-    maxLagMs: 1500,
+    maxLagMs: 1200,
     maxSpread: 0.03,
     crossTick: 0.01,
     bootstrapSeconds: 180,
-    reconcileSeconds: 45,
-    tradeFetchLimit: 30,
-    maxParallel: 4,
-    minAssetRefreshMs: 750,
+    reconcileSeconds: 20,
+    tradeFetchLimit: 80,
+    maxParallel: 12,
+    minAssetRefreshMs: 250,
+    refreshDebounceMs: 120,
+    activityCacheMs: 120,
+    bookHttpFallback: true,
+    bookTtlMs: 3000,
     pythonBin: 'python3',
     liveExec: 'python-bridge',
+    benchmarkSeconds: 0,
+    statsEvery: 25,
     help: false,
   };
 
@@ -66,16 +81,70 @@ function parseArgs(argv) {
     const nKeys = new Set([
       'myBalanceUsdc', 'sourceBalanceUsdc', 'fixedOrderUsdc', 'minPrice', 'maxPrice',
       'maxLagMs', 'maxSpread', 'crossTick', 'bootstrapSeconds', 'reconcileSeconds',
-      'tradeFetchLimit', 'maxParallel', 'minAssetRefreshMs',
+      'tradeFetchLimit', 'maxParallel', 'minAssetRefreshMs', 'refreshDebounceMs',
+      'activityCacheMs', 'bookTtlMs', 'benchmarkSeconds', 'statsEvery',
     ]);
-    out[key] = nKeys.has(key) ? Number(next) : next;
+
+    if (key === 'bookHttpFallback') {
+      out[key] = parseBool(next, true);
+    } else {
+      out[key] = nKeys.has(key) ? Number(next) : next;
+    }
   }
 
+  applyProfile(out);
   return out;
 }
 
+function applyProfile(cfg) {
+  const profile = String(cfg.profile || 'fast').toLowerCase();
+  cfg.profile = profile;
+
+  if (profile === 'turbo') {
+    cfg.maxParallel = cfg.maxParallel || 24;
+    cfg.minAssetRefreshMs = Math.min(cfg.minAssetRefreshMs || 100, 100);
+    cfg.refreshDebounceMs = Math.min(cfg.refreshDebounceMs || 40, 40);
+    cfg.activityCacheMs = Math.min(cfg.activityCacheMs || 40, 40);
+    cfg.reconcileSeconds = Math.min(cfg.reconcileSeconds || 10, 10);
+    cfg.bookHttpFallback = cfg.bookHttpFallback && false;
+    cfg.bookTtlMs = Math.max(cfg.bookTtlMs || 8000, 8000);
+    cfg.tradeFetchLimit = Math.max(cfg.tradeFetchLimit || 120, 120);
+    return;
+  }
+
+  // fast profile default (low-latency but safety checks remain)
+  cfg.maxParallel = Math.max(6, cfg.maxParallel || 12);
+  cfg.minAssetRefreshMs = Math.min(cfg.minAssetRefreshMs || 250, 250);
+  cfg.refreshDebounceMs = Math.min(cfg.refreshDebounceMs || 120, 120);
+  cfg.activityCacheMs = Math.min(cfg.activityCacheMs || 120, 120);
+  cfg.reconcileSeconds = Math.min(cfg.reconcileSeconds || 20, 20);
+}
+
 function usage() {
-  return `Usage:\n  node scripts/copy_trader_stream.js --source @handle [--paper|--live] [options]\n\nSizing:\n  --size-mode percent|fixed\n  --my-balance-usdc 100 --source-balance-usdc 20000\n  --fixed-order-usdc 1\n\nRisk params:\n  --max-lag-ms 1500 --max-spread 0.03 --cross-tick 0.01\n  --min-price 0.01 --max-price 0.99\n\nLive execution:\n  --live --live-exec python-bridge --python-bin python3\n`;}
+  return `Usage:
+  node scripts/copy_trader_stream.js --source @handle [--paper|--live] [options]
+
+Sizing:
+  --size-mode percent|fixed
+  --my-balance-usdc 100 --source-balance-usdc 20000
+  --fixed-order-usdc 1
+
+Latency profiles:
+  --profile fast|turbo               (default: fast)
+  --refresh-debounce-ms 120          (turbo defaults to 40)
+  --min-asset-refresh-ms 250         (turbo defaults to 100)
+  --book-http-fallback true|false    (turbo defaults to false)
+
+Risk params:
+  --max-lag-ms 1200 --max-spread 0.03 --cross-tick 0.01
+  --min-price 0.01 --max-price 0.99
+
+Benchmark:
+  --paper --benchmark-seconds 120 --stats-every 25
+
+Live execution:
+  --live --live-exec python-bridge --python-bin python3
+`;}
 
 function normalizeTsMs(v) {
   const ts = Number(v);
@@ -87,12 +156,19 @@ function itemKey(it) {
   return [it.transactionHash ?? '', it.asset ?? '', it.side ?? '', it.timestamp ?? '', it.price ?? '', it.size ?? ''].join('|');
 }
 
+function pctl(vals, p) {
+  if (!vals.length) return 0;
+  const sorted = [...vals].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((p / 100) * (sorted.length - 1))));
+  return sorted[idx];
+}
+
 async function getJson(url, params = {}) {
   const u = new URL(url);
   Object.entries(params).forEach(([k, v]) => {
     if (v != null) u.searchParams.set(k, String(v));
   });
-  const r = await fetch(u, { headers: { 'user-agent': 'botsparta-copy-trader-stream/1.0' } });
+  const r = await fetch(u, { headers: { 'user-agent': 'botsparta-copy-trader-stream/1.1-latency' } });
   if (!r.ok) {
     const t = await r.text();
     throw new Error(`${r.status} ${r.statusText} :: ${t.slice(0, 200)}`);
@@ -164,6 +240,17 @@ class CopyTraderStream {
     this.books = new Map(); // asset -> {bestBid,bestAsk,spread,updatedAtMs}
     this.sem = new Semaphore(cfg.maxParallel);
     this.startMs = Date.now();
+
+    this.pendingAssets = new Set();
+    this.pendingMetaByAsset = new Map();
+    this.refreshTimer = null;
+    this.refreshInFlight = null;
+    this.lastActivityFetchMs = 0;
+    this.lastActivityItems = [];
+
+    this.latencySamples = [];
+    this.maxSamples = 5000;
+    this.benchmarkTimer = null;
   }
 
   async start() {
@@ -174,14 +261,37 @@ class CopyTraderStream {
 
     if (this.cfg.sizeMode === 'percent') {
       const ratio = this.cfg.myBalanceUsdc / this.cfg.sourceBalanceUsdc;
-      console.log(`⚙️ Mode=${this.cfg.mode.toUpperCase()} Sizing=PERCENT ratio=${ratio.toFixed(6)}`);
+      console.log(`⚙️ Mode=${this.cfg.mode.toUpperCase()} Profile=${this.cfg.profile.toUpperCase()} Sizing=PERCENT ratio=${ratio.toFixed(6)}`);
     } else {
-      console.log(`⚙️ Mode=${this.cfg.mode.toUpperCase()} Sizing=FIXED usdc=${this.cfg.fixedOrderUsdc}`);
+      console.log(`⚙️ Mode=${this.cfg.mode.toUpperCase()} Profile=${this.cfg.profile.toUpperCase()} Sizing=FIXED usdc=${this.cfg.fixedOrderUsdc}`);
     }
 
     await this.bootstrap();
     this.connectWS();
     this.startReconcileLoop();
+
+    if (this.cfg.benchmarkSeconds > 0) {
+      this.benchmarkTimer = setTimeout(() => {
+        this.stop('benchmark-complete');
+      }, this.cfg.benchmarkSeconds * 1000);
+      console.log(`⏱️ Benchmark mode active for ${this.cfg.benchmarkSeconds}s`);
+    }
+
+    process.on('SIGINT', () => this.stop('SIGINT'));
+    process.on('SIGTERM', () => this.stop('SIGTERM'));
+  }
+
+  stop(reason) {
+    if (this.stopped) return;
+    this.stopped = true;
+    if (this.ws) {
+      try { this.ws.close(); } catch {}
+    }
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    if (this.benchmarkTimer) clearTimeout(this.benchmarkTimer);
+    console.log(`🛑 Stopping (${reason})`);
+    this.printLatencySummary('final');
+    if (this.cfg.benchmarkSeconds > 0) process.exit(0);
   }
 
   validateConfig() {
@@ -208,8 +318,7 @@ class CopyTraderStream {
       const asset = String(it.asset || '');
       if (asset) this.trackedAssets.add(asset);
       if (ts && ts >= cutoff) {
-        // Process fresh trades once at startup.
-        this.sem.run(() => this.processTradeItem(it, 'bootstrap')).catch(() => {});
+        this.sem.run(() => this.processTradeItem(it, 'bootstrap', { eventTs: ts, recvTs: now })).catch(() => {});
       }
     }
 
@@ -250,6 +359,69 @@ class CopyTraderStream {
     loop();
   }
 
+  requestActivityRefresh(asset, reason, meta = {}) {
+    if (asset) {
+      this.pendingAssets.add(asset);
+      if (!this.pendingMetaByAsset.has(asset)) this.pendingMetaByAsset.set(asset, meta);
+    }
+
+    if (this.refreshTimer) return;
+    const now = Date.now();
+    const elapsed = now - this.lastActivityFetchMs;
+    const delay = Math.max(0, this.cfg.refreshDebounceMs - elapsed);
+
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      this.runActivityRefresh(reason).catch((e) => console.error('[refresh error]', e.message));
+    }, delay);
+  }
+
+  async runActivityRefresh(reason = 'refresh') {
+    if (this.refreshInFlight) return;
+
+    this.refreshInFlight = (async () => {
+      const now = Date.now();
+      const useCache = this.lastActivityItems.length > 0 && (now - this.lastActivityFetchMs) <= this.cfg.activityCacheMs;
+      const items = useCache
+        ? this.lastActivityItems
+        : await fetchSourceActivity(this.sourceWallet, this.cfg.tradeFetchLimit);
+
+      if (!useCache) {
+        this.lastActivityItems = items;
+        this.lastActivityFetchMs = Date.now();
+      }
+
+      const focusAssets = this.pendingAssets.size ? new Set(this.pendingAssets) : null;
+      const metaByAsset = new Map(this.pendingMetaByAsset);
+      this.pendingAssets.clear();
+      this.pendingMetaByAsset.clear();
+
+      for (const it of items) {
+        const asset = String(it.asset || '');
+        if (focusAssets && asset && !focusAssets.has(asset)) continue;
+        const k = itemKey(it);
+        if (this.seen.has(k)) continue;
+        this.seen.add(k);
+
+        const fallbackTs = normalizeTsMs(it.timestamp);
+        const m = metaByAsset.get(asset) || {};
+        const meta = {
+          eventTs: m.eventTs || fallbackTs,
+          recvTs: m.recvTs || Date.now(),
+        };
+
+        this.sem.run(() => this.processTradeItem(it, reason, meta)).catch(() => {});
+      }
+    })();
+
+    try {
+      await this.refreshInFlight;
+    } finally {
+      this.refreshInFlight = null;
+      if (this.pendingAssets.size > 0 && !this.stopped) this.requestActivityRefresh('', 'refresh-flush');
+    }
+  }
+
   async handleWSMessage(raw) {
     let data;
     try {
@@ -258,6 +430,7 @@ class CopyTraderStream {
       return;
     }
 
+    const recvTs = Date.now();
     const arr = Array.isArray(data) ? data : [data];
     for (const m of arr) {
       const type = m?.event_type;
@@ -267,7 +440,7 @@ class CopyTraderStream {
         const bestBid = bids.length ? Number(bids[0].price) : null;
         const bestAsk = asks.length ? Number(asks[0].price) : null;
         const spread = bestBid != null && bestAsk != null ? bestAsk - bestBid : null;
-        this.books.set(String(m.asset_id || ''), { bestBid, bestAsk, spread, updatedAtMs: Date.now() });
+        this.books.set(String(m.asset_id || ''), { bestBid, bestAsk, spread, updatedAtMs: recvTs });
         continue;
       }
 
@@ -275,28 +448,26 @@ class CopyTraderStream {
         const asset = String(m.asset_id || '');
         if (!asset || !this.trackedAssets.has(asset)) continue;
 
-        const now = Date.now();
+        const now = recvTs;
         const last = this.lastAssetRefreshMs.get(asset) || 0;
         if (now - last < this.cfg.minAssetRefreshMs) continue;
         this.lastAssetRefreshMs.set(asset, now);
 
-        this.sem.run(async () => {
-          const recent = await fetchSourceActivity(this.sourceWallet, this.cfg.tradeFetchLimit);
-          for (const it of recent) {
-            if (String(it.asset || '') !== asset) continue;
-            const k = itemKey(it);
-            if (this.seen.has(k)) continue;
-            this.seen.add(k);
-            await this.processTradeItem(it, 'ws-trigger');
-          }
-        }).catch((e) => console.error('[refresh error]', e.message));
+        this.requestActivityRefresh(asset, 'ws-trigger', {
+          eventTs: normalizeTsMs(m.timestamp || m.ts || m.created_at || m.createdAt),
+          recvTs,
+        });
       }
     }
   }
 
   async getTopOfBook(asset) {
     const cached = this.books.get(asset);
-    if (cached) return cached;
+    if (cached && (Date.now() - cached.updatedAtMs) <= this.cfg.bookTtlMs) return cached;
+
+    if (!this.cfg.bookHttpFallback) {
+      return cached || { bestBid: null, bestAsk: null, spread: null, updatedAtMs: 0 };
+    }
 
     try {
       const data = await getJson(CLOB_BOOK_URL, { token_id: asset });
@@ -309,21 +480,59 @@ class CopyTraderStream {
       this.books.set(asset, out);
       return out;
     } catch {
-      return { bestBid: null, bestAsk: null, spread: null, updatedAtMs: 0 };
+      return cached || { bestBid: null, bestAsk: null, spread: null, updatedAtMs: 0 };
     }
   }
 
-  async processTradeItem(it, reason) {
+  recordLatency(sample) {
+    this.latencySamples.push(sample);
+    if (this.latencySamples.length > this.maxSamples) {
+      this.latencySamples.splice(0, this.latencySamples.length - this.maxSamples);
+    }
+
+    if (this.cfg.statsEvery > 0 && (this.latencySamples.length % this.cfg.statsEvery === 0)) {
+      this.printLatencySummary(`n=${this.latencySamples.length}`);
+    }
+  }
+
+  printLatencySummary(tag = '') {
+    if (!this.latencySamples.length) {
+      console.log(`📊 Latency summary (${tag}): no samples`);
+      return;
+    }
+
+    const totals = this.latencySamples.map((s) => s.totalMs).filter((v) => Number.isFinite(v) && v >= 0);
+    const decision = this.latencySamples.map((s) => s.decisionMs).filter((v) => Number.isFinite(v) && v >= 0);
+    const submit = this.latencySamples.map((s) => s.submitMs).filter((v) => Number.isFinite(v) && v >= 0);
+    const ack = this.latencySamples.map((s) => s.ackMs).filter((v) => Number.isFinite(v) && v >= 0);
+
+    const fmt = (v) => Number(v || 0).toFixed(1);
+    console.log(
+      `📊 Latency (${tag}) count=${totals.length} ` +
+      `total_ms[p50=${fmt(pctl(totals, 50))} p90=${fmt(pctl(totals, 90))} p99=${fmt(pctl(totals, 99))}] ` +
+      `decision_ms[p50=${fmt(pctl(decision, 50))} p90=${fmt(pctl(decision, 90))}] ` +
+      `submit_ms[p50=${fmt(pctl(submit, 50))}] ack_ms[p50=${fmt(pctl(ack, 50))}]`
+    );
+  }
+
+  async processTradeItem(it, reason, meta = {}) {
     const side = String(it?.side || '').toUpperCase();
     const asset = String(it?.asset || '');
     const srcPrice = Number(it?.price || 0);
-    const ts = normalizeTsMs(it?.timestamp);
+
+    const telemetry = {
+      eventTs: meta.eventTs || normalizeTsMs(it?.timestamp),
+      recvTs: meta.recvTs || Date.now(),
+      decisionTs: 0,
+      submitTs: 0,
+      ackTs: 0,
+    };
 
     if (!['BUY', 'SELL'].includes(side) || !asset) return;
     if (!(srcPrice >= this.cfg.minPrice && srcPrice <= this.cfg.maxPrice)) return;
 
-    const lagMs = ts ? Date.now() - ts : 0;
-    if (ts && lagMs > this.cfg.maxLagMs) return;
+    const lagMs = telemetry.eventTs ? (telemetry.recvTs - telemetry.eventTs) : 0;
+    if (telemetry.eventTs && lagMs > this.cfg.maxLagMs) return;
 
     const { bestBid, bestAsk, spread } = await this.getTopOfBook(asset);
     if (spread != null && spread > this.cfg.maxSpread) return;
@@ -351,15 +560,60 @@ class CopyTraderStream {
     if (!(copyUsdc > 0)) return;
 
     const shares = copyUsdc / px;
+    telemetry.decisionTs = Date.now();
 
     if (this.cfg.mode === 'paper') {
-      console.log(`[PAPER:${reason}] ${side} token=${asset.slice(0, 14)}.. px=${px.toFixed(4)} src_px=${srcPrice.toFixed(4)} src=$${srcUsdc.toFixed(2)} copy=$${copyUsdc.toFixed(2)} shares=${shares.toFixed(4)} lag=${lagMs}ms spread=${spread ?? 'na'}`);
+      telemetry.submitTs = telemetry.decisionTs;
+      telemetry.ackTs = Date.now();
+
+      const sample = {
+        eventTs: telemetry.eventTs,
+        recvTs: telemetry.recvTs,
+        decisionTs: telemetry.decisionTs,
+        submitTs: telemetry.submitTs,
+        ackTs: telemetry.ackTs,
+        ingestMs: telemetry.eventTs ? (telemetry.recvTs - telemetry.eventTs) : 0,
+        decisionMs: telemetry.decisionTs - telemetry.recvTs,
+        submitMs: telemetry.submitTs - telemetry.decisionTs,
+        ackMs: telemetry.ackTs - telemetry.submitTs,
+        totalMs: telemetry.ackTs - (telemetry.eventTs || telemetry.recvTs),
+      };
+      this.recordLatency(sample);
+
+      console.log(
+        `[PAPER:${reason}] ${side} token=${asset.slice(0, 14)}.. px=${px.toFixed(4)} src_px=${srcPrice.toFixed(4)} ` +
+        `src=$${srcUsdc.toFixed(2)} copy=$${copyUsdc.toFixed(2)} shares=${shares.toFixed(4)} ` +
+        `lag=${lagMs}ms spread=${spread ?? 'na'} ` +
+        `lat={eventTs:${sample.eventTs},recvTs:${sample.recvTs},decisionTs:${sample.decisionTs},submitTs:${sample.submitTs},ackTs:${sample.ackTs},` +
+        `ms:{ingest:${sample.ingestMs},decision:${sample.decisionMs},submit:${sample.submitMs},ack:${sample.ackMs},total:${sample.totalMs}}}`
+      );
       return;
     }
 
+    telemetry.submitTs = Date.now();
     const ok = await this.execLiveOrder({ tokenId: asset, side, price: px, shares });
+    telemetry.ackTs = Date.now();
+
+    const sample = {
+      eventTs: telemetry.eventTs,
+      recvTs: telemetry.recvTs,
+      decisionTs: telemetry.decisionTs,
+      submitTs: telemetry.submitTs,
+      ackTs: telemetry.ackTs,
+      ingestMs: telemetry.eventTs ? (telemetry.recvTs - telemetry.eventTs) : 0,
+      decisionMs: telemetry.decisionTs - telemetry.recvTs,
+      submitMs: telemetry.submitTs - telemetry.decisionTs,
+      ackMs: telemetry.ackTs - telemetry.submitTs,
+      totalMs: telemetry.ackTs - (telemetry.eventTs || telemetry.recvTs),
+    };
+    this.recordLatency(sample);
+
     if (ok.success) {
-      console.log(`[LIVE OK] ${side} token=${asset.slice(0, 14)}.. px=${px.toFixed(4)} shares=${shares.toFixed(4)} lag=${lagMs}ms spread=${spread ?? 'na'} ${ok.message}`);
+      console.log(
+        `[LIVE OK] ${side} token=${asset.slice(0, 14)}.. px=${px.toFixed(4)} shares=${shares.toFixed(4)} ` +
+        `lag=${lagMs}ms spread=${spread ?? 'na'} ` +
+        `lat_ms={ingest:${sample.ingestMs},decision:${sample.decisionMs},submit:${sample.submitMs},ack:${sample.ackMs},total:${sample.totalMs}} ${ok.message}`
+      );
     } else {
       console.log(`[LIVE FAIL] ${side} token=${asset.slice(0, 14)}.. err=${ok.message}`);
     }
@@ -408,7 +662,8 @@ class CopyTraderStream {
           const k = itemKey(it);
           if (this.seen.has(k)) continue;
           this.seen.add(k);
-          this.sem.run(() => this.processTradeItem(it, 'reconcile')).catch(() => {});
+          const ts = normalizeTsMs(it.timestamp);
+          this.sem.run(() => this.processTradeItem(it, 'reconcile', { eventTs: ts, recvTs: Date.now() })).catch(() => {});
         }
 
         if (addedAssets > 0 && this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -418,11 +673,11 @@ class CopyTraderStream {
       } catch (e) {
         console.error('[reconcile]', e.message);
       } finally {
-        setTimeout(run, Math.max(5, this.cfg.reconcileSeconds) * 1000);
+        setTimeout(run, Math.max(2, this.cfg.reconcileSeconds) * 1000);
       }
     };
 
-    setTimeout(run, Math.max(5, this.cfg.reconcileSeconds) * 1000);
+    setTimeout(run, Math.max(2, this.cfg.reconcileSeconds) * 1000);
   }
 }
 
