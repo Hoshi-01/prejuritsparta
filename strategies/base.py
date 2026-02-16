@@ -319,6 +319,14 @@ class BaseStrategy(ABC):
             self.log(f"No token ID for {side}", "error")
             return False
 
+        # Safety: never place a new buy if position limits are reached.
+        if not self.positions.can_open_position:
+            self.log("Max positions reached, skip buy", "warning")
+            return False
+        if self.positions.has_position(side):
+            self.log(f"Already have {side.upper()} position, skip buy", "warning")
+            return False
+
         # Polymarket 15m markets use 0.01 tick size; quantize price to valid tick.
         buy_price_raw = min(current_price + 0.02, 0.99)
         buy_price = math.ceil(buy_price_raw * 100) / 100
